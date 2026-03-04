@@ -7,9 +7,20 @@
 #include <memory>
 #include <vector>
 
+#include <cstring>
+#include <iostream>
+#include <fstream>
+#include <unistd.h>
+
 #include "hardware_interface/lexical_casts.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/clock.hpp"
+
+extern "C" {
+#include "cobs.h"
+}
+
 
 namespace gobilda_robot
 {
@@ -160,6 +171,17 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_activate(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  // open fd for comms with esp32
+  esp_rd_fd = open(ESP_FILE_PATH, O_RDWR | O_NOCTTY | O_NONBLOCK); // rd/wr for safety, no controlling terminal, non-blocking
+  // std::ofstream file(ESP_FILE_PATH);
+  if (esp_rd_fd < 0) {
+    RCLCPP_ERROR(rclcpp::get_logger("GobildaSystemHardware"),
+      "Failed to open serial port /dev/ttyACM0 for reading: %s", strerror(errno));
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  RCLCPP_DEBUG(rclcpp::get_logger("GobildaSystemHardware"),
+    "USB tty activated");
+
   RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
               "Successfully activated!");
 
@@ -188,14 +210,98 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_deactivate(
   RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
               "Successfully deactivated!");
 
+  close(esp_rd_fd); // Close the file descriptor when deactivating
+  esp_rd_fd = -1;
+  // file.close();
+  
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::return_type GobildaSystemHardware::read(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+hardware_interface::return_type GobildaSystemHardware::read(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
-  // This 'read' function should receive information from encoder sensors
-  // However, since presently there are no encoders we can ignore this function.
+  // This 'read' function should receive information from encoder sensors and store in hw_velocities
+  
+  rclcpp::Logger logger = rclcpp::get_logger("GobildaSystemHardware");
+  static rclcpp::Clock clock(RCL_STEADY_TIME);
+
+  // check if fd is still open:
+  if (esp_rd_fd < 0){
+    RCLCPP_ERROR(logger, "ACM0 port not open (esp_rd_fd < 0)");
+    return hardware_interface::return_type::ERROR;
+  }
+
+  char read_buf[sizeof(data_packet_t)]; 
+  while (true) { //align to 0x00 COBS delimiter
+    char byte;
+    ssize_t result = ::read(esp_rd_fd, &byte, 1);
+    if (result < 0) {
+      RCLCPP_ERROR(logger, "Error reading serial while aligning: %s", strerror(errno));
+      return hardware_interface::return_type::ERROR;
+    }
+
+    if (byte == 0x00) {
+      break; // Found the packet delimiter
+    }
+  }
+
+  size_t bytes_read = 0;
+  ssize_t n;
+  while (bytes_read < sizeof(read_buf)) { // read until we have a full packet
+    n = ::read(esp_rd_fd, read_buf + bytes_read, sizeof(read_buf) - bytes_read);
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK){
+        RCLCPP_DEBUG_THROTTLE(logger, clock, 1000, "No bytes available (EAGAIN) while reading packet");
+        return hardware_interface::return_type::OK;
+      }
+      RCLCPP_ERROR(logger, "Error reading serial: %s", strerror(errno));
+      return hardware_interface::return_type::ERROR;
+    }
+    if (n == 0) {
+      RCLCPP_DEBUG_THROTTLE(logger, clock, 1000, "No bytes read (EOF) while reading packet");
+      return hardware_interface::return_type::OK;
+    }
+    bytes_read += n;
+  }
+
+  data_packet_t packet;
+  cobs_decode_result res = cobs_decode(&packet, sizeof(data_packet_t), read_buf, sizeof(read_buf)); // decode into struct
+  if (res.status != COBS_DECODE_OK) {
+    RCLCPP_ERROR(logger, "COBS decode error: %d", res.status);
+    return hardware_interface::return_type::ERROR;
+  }
+  if (res.out_len != sizeof(data_packet_t)) {
+    RCLCPP_ERROR(logger, "COBS decode length mismatch: got %zu, expected %zu", res.out_len, sizeof(data_packet_t));
+    return hardware_interface::return_type::ERROR;
+  }
+
+  // validate checksum
+  uint16_t true_checksum = packet.checksum;
+  packet.checksum = 0; // zero out checksum field for calculation
+  uint16_t calc_checksum = calculate_checksum(&packet, sizeof(data_packet_t));
+
+  if (calc_checksum != true_checksum) {
+    RCLCPP_ERROR(logger, "Checksum mismatch: got 0x%04x, expected 0x%04x", calc_checksum, true_checksum);
+    return hardware_interface::return_type::ERROR;
+  }
+
+  static double last_timestamp = 0;
+  // change in time since last packet, default to 20ms (50Hz) if we don't have a valid last timestamp
+  double dt = (last_timestamp != 0 ? ((packet.encoder_data.timestamp_ms - last_timestamp) / 1000.0) : 0.02); // convert ms to seconds
+  
+  //calculate velocity from deltas
+  // ticks / ticks per rotation * 2pi * 50Hz = radians per second
+  double l_rps = packet.encoder_data.dL / Motor::TICKS_PER_ROTATION * (2 * M_PI) / dt;
+  double r_rps = packet.encoder_data.dR / Motor::TICKS_PER_ROTATION * (2 * M_PI) / dt;
+
+  for (size_t i = 0; i < hw_commands_.size(); ++i) {
+    const bool is_left = (info_.joints[i].name == "left_wheel_joint");
+    hw_velocities_[i] = (is_left ? l_rps : r_rps);
+  }
+
+  last_timestamp = packet.encoder_data.timestamp_ms;
+
+  RCLCPP_INFO_THROTTLE(logger, clock, 100, "seq=%u dL=%d dR=%d t=%u checksum=0x%04x", packet.seq, packet.encoder_data.dL, packet.encoder_data.dR, packet.encoder_data.timestamp_ms, true_checksum);
+  
   return hardware_interface::return_type::OK;
 }
 
@@ -260,6 +366,20 @@ hardware_interface::return_type gobilda_robot::GobildaSystemHardware::write(
 }
 
 }  // namespace gobilda_robot
+
+//helper checksum func
+uint16_t calculate_checksum(const void *data, size_t len) { // stolen from schmitt if we have any issues 
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint32_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += bytes[i];
+    }
+    // Fold 32-bit sum into 16 bits
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
 
 #include "pluginlib/class_list_macros.hpp"
 PLUGINLIB_EXPORT_CLASS(

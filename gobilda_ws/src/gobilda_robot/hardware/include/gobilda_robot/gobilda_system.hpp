@@ -16,9 +16,24 @@
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "gobilda_robot/motor.hpp"
+#include <stdint.h>
 
 namespace gobilda_robot
 {
+
+// structs to match esp32 encoder packet format
+typedef struct {
+  int16_t dL;      // delta left
+  int16_t dR;     // delta right
+  uint32_t timestamp_ms;  // var for timestamp
+} __attribute__((packed)) encoder_data_t;
+
+typedef struct {
+  uint8_t seq; // seq num for testing loss
+  encoder_data_t encoder_data;
+  uint16_t checksum; 
+} __attribute__((packed)) data_packet_t;
+
 class GobildaSystemHardware : public hardware_interface::SystemInterface
 {
 public:
@@ -65,6 +80,10 @@ private:
   const double gain_fwd_us_per_rads = 27.0;
   const double gain_rev_us_per_rads = 20.0;
   const double cmd_deadband_rad_s   = 0.05;
+
+  #define ESP_FILE_PATH "/dev/ttyACM0"
+  // std::ofstream file(ESP_FILE_PATH);
+  int esp_rd_fd = -1; // File descriptor for reading from ESP32 (initialized to -1 for safety)
   
   // Hard-cap on how fast the robot can actually move
   const double top_fwd_us           = 1800.0;
@@ -72,5 +91,7 @@ private:
 };
 
 }  // namespace gobilda_robot
+
+uint16_t calculate_checksum(const void *data, size_t len);
 
 #endif //GOBILDA_ROBOT__GOBILDA_SYSTEM_HPP

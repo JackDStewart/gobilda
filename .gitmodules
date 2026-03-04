@@ -4,3 +4,12 @@
 [submodule "gobilda_ws/src/kiss-icp"]
 	path = gobilda_ws/src/kiss-icp
 	url = https://github.com/PRBonn/kiss-icp
+[submodule "cobs-c"]
+	path = cobs-c
+	url = https://github.com/cmcqueen/cobs-c.git
+[submodule "gobilda_ws/src/gobilda_robot/hardware/libs/cobs"]
+	path = gobilda_ws/src/gobilda_robot/hardware/libs/cobs
+	url = https://github.com/cmcqueen/cobs-c.git
+[submodule "gobilda_ws/src/gobilda_robot/hardware/libs/cobs-c"]
+	path = gobilda_ws/src/gobilda_robot/hardware/libs/cobs-c
+	url = https://github.com/cmcqueen/cobs-c.git

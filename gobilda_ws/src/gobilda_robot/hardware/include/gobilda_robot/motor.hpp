@@ -27,8 +27,10 @@ private:
     // Values grabbed from Gobilda specs!
     int period_ns_ = 20000000, duty_cycle_ns_ = 1500000;
     int min_us_ = 1050, max_us_ = 1950;
-    
+        
 public:
+    static constexpr int TICKS_PER_ROTATION = 538; // Might need to be changed for different motors, check datasheet
+
     Motor(int pwm_chip, int pwm_channel);
     ~Motor();
     
