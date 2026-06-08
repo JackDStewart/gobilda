@@ -30,7 +30,7 @@ class DrawSquare(Node):
         
         self.subscriber_ = self.create_subscription(
             Odometry,
-            '/odometry/filtered',
+            '/gobilda_base_controller/odom',
             self.odom_callback,
             10
         )
@@ -49,7 +49,7 @@ class DrawSquare(Node):
         # Along which axis?
         # (Note that values are in rad/s)
         self.turn_msg = TwistStamped()
-        self.turn_msg.twist.angular.z = 0.72
+        self.turn_msg.twist.angular.z = 0.72     #changed this from 0.72 to 0.4
 
         # Utility Messages
         self.stop_msg = TwistStamped()
@@ -100,7 +100,7 @@ class DrawSquare(Node):
         # If robot is turining
         if (self.rotate):
             # Turn 90 degrees
-            if (self.angle_diff(self.robot_heading, self.start_heading) <= math.pi/4):
+            if (abs(self.angle_diff(self.robot_heading, self.start_heading)) <= (math.pi/2)):     # changed this to absoulte val and pi/2 instead of pi/4
                 # Save the correct command
                 self.pub_msg = self.turn_msg
 

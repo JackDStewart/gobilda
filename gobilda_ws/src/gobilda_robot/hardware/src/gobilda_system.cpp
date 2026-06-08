@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include <deque>
 
 #include <cstring>
 #include <iostream>
@@ -17,6 +18,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/clock.hpp"
 
+#include <termios.h>
 extern "C" {
 #include "cobs.h"
 }
@@ -47,18 +49,20 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_init(
   hw_commands_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
 
   for (auto i = 0u; i < info_.joints.size(); i++) {
-     try {
+
+    // changing this to see the output of the cobs encoding (was throwing an error before and blocking)
+      try {
         motors_.emplace_back(std::make_unique<Motor>(pwm_chip_numbers_[i], 0));
         RCLCPP_INFO(
           rclcpp::get_logger("GobildaSystemHardware"),
-          "Set motor to pwm chip: %d", pwm_chip_numbers_[i] 
+          "Set motor to pwm chip: %d", pwm_chip_numbers_[i]
         );
     } catch (const std::exception& e) {
-        RCLCPP_ERROR(
+        RCLCPP_WARN(
           rclcpp::get_logger("GobildaSystemHardware"),
-          "Failed to create motor on chip %d: %s", pwm_chip_numbers_[i], e.what()
+          "Motor on chip %d unavailable (skipping): %s", pwm_chip_numbers_[i], e.what()
         );
-        return hardware_interface::CallbackReturn::ERROR;
+        motors_.emplace_back(nullptr);  // keep indexing valid
     }
   }
 
@@ -111,6 +115,10 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_init(
     }
   }
 
+  for (size_t i = 0; i < info_.joints.size(); i++) {
+    if (info_.joints[i].name == "left_wheel_joint") left_wheel_idx_ = i;
+    else if (info_.joints[i].name == "right_wheel_joint") right_wheel_idx_ = i;
+  }
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -157,11 +165,20 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_activate(
 
   bool success = true;
 
+  //  -------------------- DEBUGGING ----------------------------
+  // for (auto i = 0u; i < hw_positions_.size(); i++) {
+  //   // Send a neutral signal on init
+  //   success = success & motors_[i]->trySetVelocity(1500);
+  //   RCLCPP_DEBUG(rclcpp::get_logger("GobildaSystemHardware"),
+  //                 "Motor activated");
+  // }
+  // -------------------------------------------------------------
+
+  // changed this as well:
   for (auto i = 0u; i < hw_positions_.size(); i++) {
-    // Send a neutral signal on init
-    success = success & motors_[i]->trySetVelocity(1500);
-    RCLCPP_DEBUG(rclcpp::get_logger("GobildaSystemHardware"),
-                  "Motor activated");
+      if (motors_[i] != nullptr) {
+          success = success && motors_[i]->trySetVelocity(1500);
+      }
   }
 
   if (!success)
@@ -173,14 +190,24 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_activate(
 
   // open fd for comms with esp32
   esp_rd_fd = open(ESP_FILE_PATH, O_RDWR | O_NOCTTY | O_NONBLOCK); // rd/wr for safety, no controlling terminal, non-blocking
-  // std::ofstream file(ESP_FILE_PATH);
+
   if (esp_rd_fd < 0) {
     RCLCPP_ERROR(rclcpp::get_logger("GobildaSystemHardware"),
-      "Failed to open serial port /dev/ttyACM0 for reading: %s", strerror(errno));
+      "Failed to open serial port %s for reading: %s", ESP_FILE_PATH, strerror(errno));
     return hardware_interface::CallbackReturn::ERROR;
   }
-  RCLCPP_DEBUG(rclcpp::get_logger("GobildaSystemHardware"),
-    "USB tty activated");
+  else {
+    RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
+      "esp fd opened");
+  }
+
+  struct termios tty;
+  tcgetattr(esp_rd_fd, &tty); // get ptr to current settings
+  cfmakeraw(&tty);           // disable all TTY processing
+  cfsetspeed(&tty, B115200); // match ESP32 baud rate
+  tty.c_cc[VMIN]  = 0;       // 0 min bytes
+  tty.c_cc[VTIME] = 0;      // 0 min ms for nonblocking
+  tcsetattr(esp_rd_fd, TCSANOW, &tty); //apply new settings
 
   RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
               "Successfully activated!");
@@ -211,8 +238,7 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_deactivate(
               "Successfully deactivated!");
 
   close(esp_rd_fd); // Close the file descriptor when deactivating
-  esp_rd_fd = -1;
-  // file.close();
+  RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"), "Lost packets: %d", lost_packets);
   
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -220,7 +246,6 @@ hardware_interface::CallbackReturn GobildaSystemHardware::on_deactivate(
 hardware_interface::return_type GobildaSystemHardware::read(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
   // This 'read' function should receive information from encoder sensors and store in hw_velocities
-  
   rclcpp::Logger logger = rclcpp::get_logger("GobildaSystemHardware");
   static rclcpp::Clock clock(RCL_STEADY_TIME);
 
@@ -229,137 +254,188 @@ hardware_interface::return_type GobildaSystemHardware::read(const rclcpp::Time &
     RCLCPP_ERROR(logger, "ACM0 port not open (esp_rd_fd < 0)");
     return hardware_interface::return_type::ERROR;
   }
+  
+  static bool first = true; // drop first partial packet
+  
+  // reading from the esp connected file descriptor
+  uint8_t tmp[MAX_BUF];
+  ssize_t n = ::read(esp_rd_fd, tmp, sizeof(tmp));
+  if (n < 0) {
+    RCLCPP_ERROR(logger, "Error reading bytes: %s", strerror(errno));
+    return hardware_interface::return_type::ERROR;
+  }
+  if (n == 0) {
+    RCLCPP_INFO(logger, "nothing to read 😭");
+    return hardware_interface::return_type::OK;
+  }
+  
+  //else all good, inset to end of buffer
+  read_buf.insert(read_buf.end(), tmp, tmp + n);
+  
 
-  char read_buf[sizeof(data_packet_t)]; 
-  while (true) { //align to 0x00 COBS delimiter
-    char byte;
-    ssize_t result = ::read(esp_rd_fd, &byte, 1);
-    if (result < 0) {
-      RCLCPP_ERROR(logger, "Error reading serial while aligning: %s", strerror(errno));
-      return hardware_interface::return_type::ERROR;
-    }
+  //------------------------ debug print the buffer contents in hex and ascii -------------------------
+  // RCLCPP_INFO(logger, "%zu bytes in buffer", read_buf.size());
+  // for (ssize_t i = 0; i < n; i++) {
+  //   // print ascii and hex of each byte read
+  //   RCLCPP_INFO(logger, "  byte[%zu] = 0x%02x '%c'", i, tmp[i], (isprint(tmp[i]) ? tmp[i] : '.'));
+  // }
+  // --------------------------------------------------------------------------------------------------
 
-    if (byte == 0x00) {
-      break; // Found the packet delimiter
+  //only called on first invocation
+  while (first && !read_buf.empty()) {
+    if (!(read_buf.front() | 0x00)) {  
+      first = false;
+      RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
+        "found first 0x00 dropped partial packet");
     }
+    read_buf.erase(read_buf.begin());
+    RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
+    "deleted begining of buffer...%zu bytes in buffer", read_buf.size());
+  }
+  if (first){
+    RCLCPP_INFO(rclcpp::get_logger("GobildaSystemHardware"),
+    "Did not drop packets yet...%zu bytes in buffer", read_buf.size());
   }
 
-  size_t bytes_read = 0;
-  ssize_t n;
-  while (bytes_read < sizeof(read_buf)) { // read until we have a full packet
-    n = ::read(esp_rd_fd, read_buf + bytes_read, sizeof(read_buf) - bytes_read);
-    if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK){
-        RCLCPP_DEBUG_THROTTLE(logger, clock, 1000, "No bytes available (EAGAIN) while reading packet");
-        return hardware_interface::return_type::OK;
+  // vars for writing to packet array
+  uint8_t encoded_frame[PACKET_ENCODED_SIZE];
+  bool found_packet;
+  size_t r = 0;
+  
+  // parsing data
+  while (r < read_buf.size()) {
+    if (!read_buf[r]) { // 0x00 byte
+      if (r == 0){
+        // if first byte is 0, want to empty the frame, skip this zero byte and continue
+        read_buf.erase(read_buf.begin());
+        // restart the search (don't break)
+        r = 0;
+        continue;
       }
-      RCLCPP_ERROR(logger, "Error reading serial: %s", strerror(errno));
-      return hardware_interface::return_type::ERROR;
+      // parse packet between 0 and r
+      memcpy(encoded_frame, read_buf.data() + (r - PACKET_ENCODED_SIZE), std::min(r, PACKET_ENCODED_SIZE)); // copy packet to temp buffer for decoding, cap at max packet size
+      //erase frames between l and r (inclusive)
+      read_buf.erase(read_buf.begin(), read_buf.begin() + r + 1);
+      found_packet = true;
+      // RCLCPP_INFO(logger, "copied frame of %zu bytes", r);
+      break;
     }
-    if (n == 0) {
-      RCLCPP_DEBUG_THROTTLE(logger, clock, 1000, "No bytes read (EOF) while reading packet");
-      return hardware_interface::return_type::OK;
-    }
-    bytes_read += n;
+    r++;
   }
 
+  // we didn't find a full packet yet, wait for more data
+  if (!found_packet) {
+    return hardware_interface::return_type::OK;
+  }
+
+  // ------------------------------------------ debugging -------------------------------------------
+  // RCLCPP_INFO(logger, "Frame size r=%zu, encoded_frame size=%zu", r, sizeof(encoded_frame));
+  // for (size_t i = 0; i < r; i++) {
+  //   RCLCPP_INFO(logger, "  byte[%zu] = 0x%02x", i, encoded_frame[i]);
+  // }
+  // --------------------------------------------------------------------------------------------------
+  
+  // checking the different cases for the packet (mismatch) 
+  if (r != sizeof(encoded_frame)) {
+    RCLCPP_ERROR(logger, "Frame size mismatch: got %zu bytes, expected %zu bytes", r, sizeof(encoded_frame));
+    return hardware_interface::return_type::OK;
+  }
+
+  // decoding the result array into the data_packet_t struct
   data_packet_t packet;
-  cobs_decode_result res = cobs_decode(&packet, sizeof(data_packet_t), read_buf, sizeof(read_buf)); // decode into struct
+  cobs_decode_result res = cobs_decode(&packet, sizeof(data_packet_t), encoded_frame, sizeof(encoded_frame)); // decode into struct
+  
+  // checking for errors
   if (res.status != COBS_DECODE_OK) {
-    RCLCPP_ERROR(logger, "COBS decode error: %d", res.status);
+    RCLCPP_ERROR(logger, "COBS decode error: %x", res.status);
     return hardware_interface::return_type::ERROR;
   }
   if (res.out_len != sizeof(data_packet_t)) {
     RCLCPP_ERROR(logger, "COBS decode length mismatch: got %zu, expected %zu", res.out_len, sizeof(data_packet_t));
     return hardware_interface::return_type::ERROR;
   }
-
+  
   // validate checksum
   uint16_t true_checksum = packet.checksum;
   packet.checksum = 0; // zero out checksum field for calculation
   uint16_t calc_checksum = calculate_checksum(&packet, sizeof(data_packet_t));
 
+  // compare checksums
   if (calc_checksum != true_checksum) {
-    RCLCPP_ERROR(logger, "Checksum mismatch: got 0x%04x, expected 0x%04x", calc_checksum, true_checksum);
+    RCLCPP_INFO(logger, "Checksum mismatch: got 0x%04x, expected 0x%04x", calc_checksum, true_checksum);
     return hardware_interface::return_type::ERROR;
   }
 
-  static double last_timestamp = 0;
   // change in time since last packet, default to 20ms (50Hz) if we don't have a valid last timestamp
+  static double last_timestamp = 0;
   double dt = (last_timestamp != 0 ? ((packet.encoder_data.timestamp_ms - last_timestamp) / 1000.0) : 0.02); // convert ms to seconds
   
-  //calculate velocity from deltas
+  //calculate velocity from tick deltas
   // ticks / ticks per rotation * 2pi * 50Hz = radians per second
-  double l_rps = packet.encoder_data.dL / Motor::TICKS_PER_ROTATION * (2 * M_PI) / dt;
-  double r_rps = packet.encoder_data.dR / Motor::TICKS_PER_ROTATION * (2 * M_PI) / dt;
+  double l_rps = -((double) packet.encoder_data.dL / Motor::TICKS_PER_ROTATION) * (2 * M_PI) / dt;
+  double r_rps = ((double) packet.encoder_data.dR / Motor::TICKS_PER_ROTATION) * (2 * M_PI) / dt;
 
-  for (size_t i = 0; i < hw_commands_.size(); ++i) {
-    const bool is_left = (info_.joints[i].name == "left_wheel_joint");
-    hw_velocities_[i] = (is_left ? l_rps : r_rps);
-  }
+  //add to hardware velocity variables
+  hw_velocities_[left_wheel_idx_] = l_rps;
+  hw_velocities_[right_wheel_idx_] = r_rps;
 
+  // timestamp code
   last_timestamp = packet.encoder_data.timestamp_ms;
+  static uint8_t prev_seq;
+  if(!first && (uint8_t)(prev_seq + 1) != packet.seq) { // typecase to wraparound
+    RCLCPP_INFO(logger, "skipped seq - previous %u, current%u", prev_seq, packet.seq);
+    lost_packets++;
+  }
+  prev_seq = packet.seq;
 
-  RCLCPP_INFO_THROTTLE(logger, clock, 100, "seq=%u dL=%d dR=%d t=%u checksum=0x%04x", packet.seq, packet.encoder_data.dL, packet.encoder_data.dR, packet.encoder_data.timestamp_ms, true_checksum);
-  
+  // ---------------------------------------------------------------------- DEBUGGING (can comment out)---------------------------------------------------------------------------
+  // RCLCPP_INFO(logger, "seq=%u dL=%d dR=%d t=%u checksum=0x%04x", packet.seq, packet.encoder_data.dL, packet.encoder_data.dR, packet.encoder_data.timestamp_ms, true_checksum);
+  // RCLCPP_INFO(logger, "seq=%u dL=%d dR=%d t=%u checksum=0x%04x", packet.seq, packet.encoder_data.dL, packet.encoder_data.dR, packet.encoder_data.timestamp_ms, true_checksum);
+  // RCLCPP_INFO(logger, "\nLeft rads/sec: %.2lf\nRight rads/sec: %.2lf", l_rps, r_rps);
+  // RCLCPP_INFO(logger, "\nLeft meter/sec: %.2lf\nRight meter/sec: %.2lf", l_rps * Motor::WHEEL_RADIUS, r_rps * Motor::WHEEL_RADIUS);
+  // -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
   return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type gobilda_robot::GobildaSystemHardware::write(
     const rclcpp::Time &, const rclcpp::Duration &) 
 {
-  bool success = true;
+  rclcpp::Logger logger = rclcpp::get_logger("GobildaSystemHardware");
 
-  // Map wheel angular velocity (rad/s) to PWM µs
-  auto map_vel_to_us = [&](double u_rad_s) -> int {
-    // Handle deadband - zero output within deadband
-    if (std::fabs(u_rad_s) < cmd_deadband_rad_s)
-        return static_cast<int>(std::llround(neutral_us));
+  // to keep track of sequence number
+  static uint8_t seq = 0;
 
-    const bool fwd = (u_rad_s > 0.0);
-    
-    // Remove deadband and scale the remaining velocity
-    double mag = std::fabs(u_rad_s) - cmd_deadband_rad_s;
-    
-    // Use your configured base and gain values (don't override!)
-    double base = fwd ? deadband_fwd_us : deadband_rev_us;
-    double gain = fwd ? gain_fwd_us_per_rads : gain_rev_us_per_rads;
+  // --------------------- debug print hw_commands -----------------------
+  // for (size_t i = 0; i < hw_commands_.size(); i++) {
+  //   RCLCPP_INFO(logger, "hw_commands_[%zu] = %f", i, hw_commands_[i]);
+  // }
+  // ---------------------------------------------------------------------
+  
+  // writing the target speeds along with other struct memebers to target speed packet
+  target_speed_packet_t tsp = {};
+  tsp.target_left_rads = (float) hw_commands_[left_wheel_idx_] * -1.0;
+  tsp.target_right_rads = (float) hw_commands_[right_wheel_idx_];
+  tsp.seq = seq++;
+  tsp.checksum = 0;
+  uint16_t checksum = calculate_checksum(&tsp, sizeof(target_speed_packet_t));
+  tsp.checksum = checksum;
 
-    // Calculate pulse width using actual velocity magnitude
-    double pulse = neutral_us + std::copysign(base + gain * mag, u_rad_s);
-
-    // Directional caps to enforce your chosen "full" values'
-    // Hardware guard-rails
-    if (fwd) {
-        pulse = std::min(pulse, top_fwd_us);
-    } else {
-        pulse = std::max(pulse, top_rev_us);
-    }
-
-    return static_cast<int>(std::llround(pulse));
-  };
-
-  for (size_t i = 0; i < hw_commands_.size(); ++i) {
-    // One sign flip for the left side so +u means forward robot motion
-    const bool is_left = (info_.joints[i].name == "left_wheel_joint");
-    const double u_rad_s = hw_commands_[i] * (is_left ? -1.0 : 1.0);
-
-    const int pulse_i = map_vel_to_us(u_rad_s);
-
-    // Optional: throttle log to see mapping/clamping
-    RCLCPP_DEBUG(
-      rclcpp::get_logger("GobildaSystemHardware"),
-      "[%s] u=%.3f rad/s -> %d us",
-      info_.joints[i].name.c_str(), u_rad_s, pulse_i
-    );
-
-    success = success && motors_[i]->trySetVelocity(pulse_i);
+  // done building the packet, need to encode with COBS now
+  uint8_t packet_buf[sizeof(target_speed_packet_t) + 2]; // +2 for COBS overhead + zero terminator
+  cobs_encode_result res = cobs_encode(packet_buf, sizeof(packet_buf) - 1, &tsp, sizeof(target_speed_packet_t)); // encode 
+  if (res.status != COBS_ENCODE_OK) {
+    RCLCPP_ERROR(logger, "COBS encode error: %x", res.status);
+    return hardware_interface::return_type::ERROR;
   }
 
-  if (!success) {
-    RCLCPP_ERROR(rclcpp::get_logger("GobildaSystemHardware"),
-                 "Error setting velocity on motors during write step!");
-    return hardware_interface::return_type::ERROR;
+  // manually append zero terminator
+  packet_buf[res.out_len] = 0x00; 
+  
+  // write to fd
+  ssize_t written = ::write(esp_rd_fd, packet_buf, res.out_len + 1);
+  if (written < 0) {
+    RCLCPP_ERROR(logger, "Write failed: %s", strerror(errno));
   }
 
   return hardware_interface::return_type::OK;

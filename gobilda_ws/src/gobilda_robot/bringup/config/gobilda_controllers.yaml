@@ -13,9 +13,10 @@ gobilda_base_controller:
     left_wheel_names: ["left_wheel_joint"]
     right_wheel_names: ["right_wheel_joint"]
 
-    wheel_separation: 0.4318
-    wheel_radius: 0.044
-
+    # wheel_separation: 0.4318
+    wheel_separation: 0.381    # changed this value because the urdf has it at this value. Increase if not turning about 90 degrees (0.365 was the val before, just meeasureed it as 0.381)
+    wheel_radius: 0.048
+    
     wheel_separation_multiplier: 1.0
     left_wheel_radius_multiplier: 1.0
     right_wheel_radius_multiplier: 1.0
@@ -27,10 +28,10 @@ gobilda_base_controller:
     pose_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
     twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
 
-    open_loop: true
+    open_loop: false  # changed this from true to false (added encoders to make it closed loop)
     position_feedback: false
     # The ODOM TRANFORM will come from ths KISS_ICP package!
-    enable_odom_tf: false
+    enable_odom_tf: true    # also changed this from false to true (added encoders)
 
     cmd_vel_timeout: 1.0
     linear.x.has_velocity_limits: true
@@ -39,6 +40,8 @@ gobilda_base_controller:
     linear.x.has_jerk_limits: false
     linear.x.max_velocity: 0.25
     linear.x.min_velocity: -0.25
+    # linear.x.max_velocity: 0.5      # changed the limits, can change them back later if needed
+    # linear.x.min_velocity: -0.5     # changed the limits, can change them back later if needed
     linear.x.max_acceleration: 0.5
     
     linear.x.max_jerk: 0.0

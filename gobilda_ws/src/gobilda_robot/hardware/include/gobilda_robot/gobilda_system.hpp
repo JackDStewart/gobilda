@@ -34,6 +34,14 @@ typedef struct {
   uint16_t checksum; 
 } __attribute__((packed)) data_packet_t;
 
+typedef struct {
+  float target_left_rads;
+  float target_right_rads;
+  uint8_t seq; // seq num for testing loss
+  uint16_t checksum; 
+} __attribute__((packed)) target_speed_packet_t;
+
+
 class GobildaSystemHardware : public hardware_interface::SystemInterface
 {
 public:
@@ -59,6 +67,11 @@ public:
     const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
+
+  //indices of left and right wheel
+  size_t left_wheel_idx_;
+  size_t right_wheel_idx_;
+  
   // Store the command for the simulated robot
   std::vector<double> hw_commands_;
   std::vector<double> hw_positions_;
@@ -81,9 +94,15 @@ private:
   const double gain_rev_us_per_rads = 20.0;
   const double cmd_deadband_rad_s   = 0.05;
 
-  #define ESP_FILE_PATH "/dev/ttyACM0"
-  // std::ofstream file(ESP_FILE_PATH);
-  int esp_rd_fd = -1; // File descriptor for reading from ESP32 (initialized to -1 for safety)
+  #define ESP_FILE_PATH "/dev/ttyACM0"   
+  // #define ESP_FILE_PATH "/dev/ttyUSB0"
+  // #define ESP_FILE_PATH "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+  static constexpr size_t PACKET_ENCODED_SIZE = sizeof(data_packet_t) + 1; // +1 for COBS overhead
+  static constexpr size_t MAX_BUF = 4 * PACKET_ENCODED_SIZE;  
+  std::vector<uint8_t> read_buf;
+  int esp_rd_fd = -1; // File descriptor for reading from ESP3ched up on me 😭, changed it to recognize the device instead
+  int lost_packets = 0; // track lost packets
+  
   
   // Hard-cap on how fast the robot can actually move
   const double top_fwd_us           = 1800.0;

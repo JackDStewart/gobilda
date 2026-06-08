@@ -17,11 +17,12 @@ setup(
     maintainer_email='cdiazalv@calpoly.edu',
     description='TODO: Package description',
     license='TODO: License declaration',
-    tests_require=['pytest'],
+    # tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'draw_square_fb = gobilda_utilities.draw_square_fb:main',
             'teleop_gobilda = gobilda_utilities.teleop_twist_keyboard:main',
+            'bump_and_go = gobilda_utilities.control_node:main',
         ],
     },
 )

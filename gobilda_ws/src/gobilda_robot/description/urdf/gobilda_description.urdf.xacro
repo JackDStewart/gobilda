@@ -24,19 +24,19 @@
     <xacro:property name="wheel_separation" value="0.4318"/>
     <xacro:property name="wheel_offset_x" value="0.17"/>
     <xacro:property name="wheel_offset_y" value="0.23"/>
-    <xacro:property name="wheel_density" value="900"/> <!-- Ruber -->
+    <xacro:property name="wheel_density" value="900"/> <!-- Rubber -->
     <xacro:property name="wheel_mass" value="${wheel_density * PI * wheel_radius * wheel_radius * wheel_width}"/>
     <xacro:property name="wheel_inertia_x" value="${1.0/12.0 * wheel_mass * (3*wheel_radius*wheel_radius + wheel_width*wheel_width)}"/>
     <xacro:property name="wheel_inertia_y" value="${1.0/12.0 * wheel_mass * (3*wheel_radius*wheel_radius + wheel_width*wheel_width)}"/>
     <xacro:property name="wheel_inertia_z" value="${1.0/2.0 * wheel_mass * wheel_radius * wheel_radius}"/>
 
-    <xacro:property name="lidar_offset_x"   value="0.1"/>
-    <xacro:property name="lidar_offset_y"   value="-0.1"/>
+    <xacro:property name="lidar_offset_x"   value="0.1"/> <!--should match lidars actual position-->
+    <xacro:property name="lidar_offset_y"   value="0.0"/>
     <xacro:property name="lidar_offset_z"   value="0.07"/>
 
-    <xacro:property name="oakd_pro_x_offset"    value="0.2"/>
-    <xacro:property name="oakd_pro_y_offset"    value="0.1"/>
-    <xacro:property name="oakd_pro_z_offset"    value="0.07"/>
+    <xacro:property name="oakd_pro_x_offset"    value="0.26"/>
+    <xacro:property name="oakd_pro_y_offset"    value="0.0"/>
+    <xacro:property name="oakd_pro_z_offset"    value="0.04"/>
 
 
     <!-- Control Parameters -->    
@@ -197,7 +197,7 @@
     <xacro:rplidar name="rplidar" parent_link="base_link" gazebo="$(arg gazebo)">
         <!-- Should correspond to the actual offset on the robot -->
         <origin xyz="${lidar_offset_x} ${lidar_offset_y} ${lidar_offset_z}"
-                rpy="0 0 0.30"/>
+                rpy="0 0 0"/>
     </xacro:rplidar>
 
     <xacro:oakd model="pro" parent_link="base_link">

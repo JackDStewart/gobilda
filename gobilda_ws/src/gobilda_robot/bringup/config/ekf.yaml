@@ -117,6 +117,19 @@ ekf_odom:
         odom0_pose_rejection_threshold: 5.0
         odom0_twist_rejection_threshold: 1.0
 
+        #wheel encoder data
+        odom1: /gobilda_base_controller/odom 
+        odom1_config: [false,  false, false, # x, y, z
+                       false, false, false, # roll, pitch, yaw
+                       true, false, false, # vx, vy, vz
+                       false, false, true,  # vroll, vpitch, vyaw
+                       false, false, false] # ax, xy, az
+        odom1_queue_size: 10
+        odom1_differential: false
+        odom1_relative: false
+        odom1_pose_rejection_threshold: 5.0
+        odom1_twist_rejection_threshold: 1.0
+        
         rtab_odom: rtabmap/odom
         rtab_odom_config: [  true,   true,   false,
                             false,  false,  true,

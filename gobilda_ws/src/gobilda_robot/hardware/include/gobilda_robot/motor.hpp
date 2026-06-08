@@ -29,7 +29,8 @@ private:
     int min_us_ = 1050, max_us_ = 1950;
         
 public:
-    static constexpr int TICKS_PER_ROTATION = 538; // Might need to be changed for different motors, check datasheet
+    static constexpr double TICKS_PER_ROTATION = 537.7; // Might need to be changed for different motors, check datasheet
+    static constexpr double WHEEL_RADIUS = 0.048; // in meters, might need to be changed for different robots
 
     Motor(int pwm_chip, int pwm_channel);
     ~Motor();
